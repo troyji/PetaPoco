@@ -7,13 +7,23 @@ namespace PetaPoco
 {
     public class DbSql : Sql
     {
-        public new class SqlJoinClause : Sql.SqlJoinClause
+        public class DbSqlJoinClause
         {
-            public SqlJoinClause(DbSql sql) : base(sql) { }
+            private PetaPoco.Sql.SqlJoinClause _join;
 
-            public new DbSql On(string onClause, params object[] args)
+            private DbSqlJoinClause(PetaPoco.Sql.SqlJoinClause join)
             {
-                return (DbSql)base.On(onClause, args);
+                _join = join;
+            }
+
+            public static explicit operator DbSqlJoinClause(PetaPoco.Sql.SqlJoinClause join)
+            {
+                return new DbSqlJoinClause(join);
+            }
+
+            public DbSql On(string onClause, params object[] args)
+            {
+                return (DbSql)_join.On(onClause, args);
             }
         }
 
@@ -27,51 +37,51 @@ namespace PetaPoco
         }
 
 
-
+        private Sql Wrapper { get { return (Sql)this; } }
 
         public new DbSql Append(Sql sql)
         {
-            return (DbSql)new DbSql(_db).Append(sql);
+            return (DbSql)Wrapper.Append(sql);
         }
 
         public new DbSql Append(string sql, params object[] args)
         {
-            return (DbSql)new DbSql(_db).Append(sql, args);
+            return (DbSql)Wrapper.Append(sql, args);
         }
 
         public new DbSql Where(string sql, params object[] args)
         {
-            return (DbSql)new DbSql(_db).Where(sql, args);
+            return (DbSql)Wrapper.Where(sql, args);
         }
 
         public new DbSql OrderBy(params object[] columns)
         {
-            return (DbSql)new DbSql(_db).OrderBy(columns);
+            return (DbSql)Wrapper.OrderBy(columns);
         }
 
         public new DbSql Select(params object[] columns)
         {
-            return (DbSql)new DbSql(_db).Select(columns);
+            return (DbSql)Wrapper.Select(columns);
         }
 
         public new DbSql From(params object[] tables)
         {
-            return (DbSql)new DbSql(_db).From(tables);
+            return (DbSql)Wrapper.From(tables);
         }
 
         public new DbSql GroupBy(params object[] columns)
         {
-            return (DbSql)new DbSql(_db).GroupBy(columns);
+            return (DbSql)Wrapper.GroupBy(columns);
         }
 
-        public new DbSql.SqlJoinClause InnerJoin(string table)
+        public new DbSql.DbSqlJoinClause InnerJoin(string table)
         {
-            return (DbSql.SqlJoinClause)new DbSql(_db).InnerJoin(table);
+            return (DbSql.DbSqlJoinClause)Wrapper.InnerJoin(table);
         }
 
-        public new DbSql.SqlJoinClause LeftJoin(string table)
+        public new DbSql.DbSqlJoinClause LeftJoin(string table)
         {
-            return (DbSql.SqlJoinClause)new DbSql(_db).LeftJoin(table);
+            return (DbSql.DbSqlJoinClause)Wrapper.LeftJoin(table);
         }
 
 
@@ -242,14 +252,14 @@ namespace PetaPoco
             return (DbSql)new DbSql(db).GroupBy(columns);
         }
 
-        public static DbSql.SqlJoinClause InnerJoin(this Database db, string table) 
+        public static DbSql.DbSqlJoinClause InnerJoin(this Database db, string table) 
         {
-            return (DbSql.SqlJoinClause)new DbSql(db).InnerJoin(table);
+            return (DbSql.DbSqlJoinClause)new DbSql(db).InnerJoin(table);
         }
 
-        public static DbSql.SqlJoinClause LeftJoin(this Database db, string table) 
+        public static DbSql.DbSqlJoinClause LeftJoin(this Database db, string table) 
         {
-            return (DbSql.SqlJoinClause)new DbSql(db).LeftJoin(table);
+            return (DbSql.DbSqlJoinClause)new DbSql(db).LeftJoin(table);
         }
     }
 }
