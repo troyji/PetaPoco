@@ -68,15 +68,44 @@ namespace PetaPoco
 	[AttributeUsage(AttributeTargets.Class)]
 	public class PrimaryKeyAttribute : Attribute
 	{
-		public PrimaryKeyAttribute(string primaryKey)
+		public PrimaryKeyAttribute(params string[] primaryKeyColumns)
 		{
-			Value = primaryKey;
-			autoIncrement = true;
+            if (primaryKeyColumns == null || primaryKeyColumns.Length < 0)
+                throw new ArgumentException("One or more primary keys are required by the PrimaryKeyAttribute.");
+
+            Columns = primaryKeyColumns;
+            if(Columns.Length == 1 ) autoIncrement = true;
 		}
 
-		public string Value { get; private set; }
-		public string sequenceName { get; set; }
-		public bool autoIncrement { get; set; }
+		public string[] Columns { get; private set; }
+
+        private string _sequenceName;
+		public string sequenceName 
+        {
+            get
+            {
+                return _sequenceName;
+            }
+            set
+            {
+                if (Columns.Length > 1) throw new NotSupportedException("A sequence is not supported with multiple primary key columns.");
+                _sequenceName = value;
+            } 
+        }
+
+        private bool _autoIncrement;
+		public bool autoIncrement 
+        {
+            get
+            {
+                return _autoIncrement;
+            }
+            set
+            {
+                if (Columns.Length > 1) throw new NotSupportedException("Auto increment is not supported with multiple primary key columns.");
+                _autoIncrement = value;
+            }
+        }
 	}
 
 	[AttributeUsage(AttributeTargets.Property)]
@@ -110,7 +139,7 @@ namespace PetaPoco
 	public class TableInfo
 	{
 		public string TableName { get; set; }
-		public string PrimaryKey { get; set; }
+		public string[] PrimaryKeys { get; set; }
 		public bool AutoIncrement { get; set; }
 		public string SequenceName { get; set; }
 	}
@@ -600,6 +629,12 @@ namespace PetaPoco
 		{
 			return Query<T>(sql, args).ToList();
 		}
+
+        //Select *
+        public List<T> Fetch<T>()
+        {
+            return Fetch<T>(string.Empty);
+        }
 
 		public List<T> Fetch<T>(Sql sql) 
 		{
@@ -1097,23 +1132,112 @@ namespace PetaPoco
 			}
 		}
 
+
+        public bool IsAnonymousType(Type type)
+        {
+            if (type.GetCustomAttributes(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false).Count() == 0) return false;
+            if (!type.FullName.Contains("AnonymousType")) return false;
+            return true;
+        }
+
+        private string BuildPrimaryKeyWhere(IEnumerable<string> primaryKeyNames, ref int startParamIndex, string prefix)
+        {
+            StringBuilder builder = new StringBuilder("WHERE ");
+            int i = startParamIndex;
+            foreach (string primaryKeyName in primaryKeyNames)
+            {
+                if (i > startParamIndex) builder.AppendFormat(" AND ");
+                builder.AppendFormat("{0}={1}{2}", EscapeSqlIdentifier(primaryKeyName), prefix, i);
+                i++;
+            }
+            return builder.ToString();
+        }
+        private string BuildPrimaryKeyWhere(IEnumerable<string> primaryKeyNames, string prefix)
+        {
+            int i = 0;
+            return BuildPrimaryKeyWhere(primaryKeyNames, ref i, prefix);
+        }
+        private string BuildPrimaryKeyWhere<T>(ref int startParamIndex, string prefix)
+        {
+            TableInfo ti = PocoData.ForType(typeof(T)).TableInfo;
+            return BuildPrimaryKeyWhere(ti.PrimaryKeys, ref startParamIndex, prefix);
+        }
+        private string BuildPrimaryKeyWhere<T>(string prefix)
+        {
+            int i = 0;
+            return BuildPrimaryKeyWhere<T>(ref i, prefix);
+        }
+        private IDictionary<string, object> ParsePrimaryKeyValues(object primaryKeyValues)
+        {           
+            Type valueType = primaryKeyValues.GetType();
+            if (IsAnonymousType(valueType))
+            {
+                IDictionary<string, object> primaryKeys = new Dictionary<string, object>();
+                foreach (PropertyInfo pi in valueType.GetProperties())
+                {
+                    primaryKeys.Add(pi.Name, pi.GetValue(primaryKeyValues, null));
+                }
+                return primaryKeys;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        private IDictionary<string, object> ParsePrimaryKeyValues(IEnumerable<string> primaryKeyNames, object poco)
+        {
+            IDictionary<string, object> primaryKeys = new Dictionary<string, object>();
+            var pd = PocoData.ForObject(poco, primaryKeyNames);
+            foreach (string primaryKeyName in primaryKeyNames)
+            {
+                PocoColumn pc;
+                if (pd.Columns.TryGetValue(primaryKeyName, out pc))
+                {
+                    primaryKeys.Add(primaryKeyName, pc.GetValue(poco));
+                }
+            }
+
+            return primaryKeys;
+        }
 			
 		public IEnumerable<T> Query<T>(Sql sql) 
 		{
 			return Query<T>(sql.SQL, sql.Arguments);
 		}
 
-		public bool Exists<T>(object primaryKey) 
+		public bool Exists<T>(object primaryKeys) 
 		{
-			return FirstOrDefault<T>(string.Format("WHERE {0}=@0", EscapeSqlIdentifier(PocoData.ForType(typeof(T)).TableInfo.PrimaryKey)), primaryKey) != null;
+            IDictionary<string, object> keys = ParsePrimaryKeyValues(primaryKeys); 
+            if (keys == null)
+            {
+                keys = new Dictionary<string, object>();
+                keys.Add(PocoData.ForType(typeof(T)).TableInfo.PrimaryKeys[0], primaryKeys);
+            }
+            string where = BuildPrimaryKeyWhere(keys.Keys, "@");
+			return FirstOrDefault<T>(where, keys.Values.ToArray()) != null;
 		}
-		public T Single<T>(object primaryKey) 
-		{
-			return Single<T>(string.Format("WHERE {0}=@0", EscapeSqlIdentifier(PocoData.ForType(typeof(T)).TableInfo.PrimaryKey)), primaryKey);
+		public T Single<T>(object primaryKeys)
+        {
+            IDictionary<string, object> keys = ParsePrimaryKeyValues(primaryKeys);
+            if (keys == null)
+            {
+                keys = new Dictionary<string, object>();
+                keys.Add(PocoData.ForType(typeof(T)).TableInfo.PrimaryKeys[0], primaryKeys);
+            }
+            string where = BuildPrimaryKeyWhere(keys.Keys, "@");
+            return Single<T>(where, keys.Values.ToArray());
 		}
-		public T SingleOrDefault<T>(object primaryKey) 
-		{
-			return SingleOrDefault<T>(string.Format("WHERE {0}=@0", EscapeSqlIdentifier(PocoData.ForType(typeof(T)).TableInfo.PrimaryKey)), primaryKey);
+		public T SingleOrDefault<T>(object primaryKeys)
+        {
+            IDictionary<string, object> keys = ParsePrimaryKeyValues(primaryKeys);
+            if (keys == null)
+            {
+                keys = new Dictionary<string, object>();
+                keys.Add(PocoData.ForType(typeof(T)).TableInfo.PrimaryKeys[0], primaryKeys);
+            }
+            string where = BuildPrimaryKeyWhere(keys.Keys, "@");
+            return SingleOrDefault<T>(where, keys.Values.ToArray());
 		}
 		public T Single<T>(string sql, params object[] args) 
 		{
@@ -1172,15 +1296,11 @@ namespace PetaPoco
 			}
 		}
 
-		public object Insert(string tableName, string primaryKeyName, object poco)
-		{
-			return Insert(tableName, primaryKeyName, true, poco);
-		}
 
 		// Insert a poco into a table.  If the poco has a property with the same name 
 		// as the primary key the id of the new record is assigned to it.  Either way,
 		// the new id is returned.
-		public object Insert(string tableName, string primaryKeyName, bool autoIncrement, object poco)
+		private object Insert(string tableName, IEnumerable<string> primaryKeyNames, bool autoIncrement, object poco)
 		{
 			try
 			{
@@ -1189,10 +1309,11 @@ namespace PetaPoco
 				{
 					using (var cmd = CreateCommand(_sharedConnection, ""))
 					{
-						var pd = PocoData.ForObject(poco, primaryKeyName);
+						var pd = PocoData.ForObject(poco, primaryKeyNames);
 						var names = new List<string>();
 						var values = new List<string>();
 						var index = 0;
+                        string identityKeyName = (primaryKeyNames != null && autoIncrement) ? primaryKeyNames.First() : null;
 						foreach (var i in pd.Columns)
 						{
 							// Don't insert result columns
@@ -1200,7 +1321,7 @@ namespace PetaPoco
 								continue;
 
 							// Don't insert the primary key (except under oracle where we need bring in the next sequence value)
-							if (autoIncrement && primaryKeyName != null && string.Compare(i.Key, primaryKeyName, true)==0)
+                            if (autoIncrement && !string.IsNullOrEmpty(identityKeyName) && string.Compare(i.Key, identityKeyName, true) == 0)
 							{
 								if (_dbType == DBType.Oracle && !string.IsNullOrEmpty(pd.TableInfo.SequenceName))
 								{
@@ -1221,15 +1342,14 @@ namespace PetaPoco
 								string.Join(",", values.ToArray())
 								);
 
-						if (!autoIncrement)
+                        if (!autoIncrement || string.IsNullOrEmpty(identityKeyName))
 						{
 							DoPreExecute(cmd);
 							cmd.ExecuteNonQuery();
 							OnExecutedCommand(cmd);
 							return true;
 						}
-
-
+                        
 						object id;
 						switch (_dbType)
 						{
@@ -1246,55 +1366,28 @@ namespace PetaPoco
 								OnExecutedCommand(cmd);
 								break;
 							case DBType.PostgreSQL:
-								if (primaryKeyName != null)
-								{
-									cmd.CommandText += string.Format("returning {0} as NewID", EscapeSqlIdentifier(primaryKeyName));
-									DoPreExecute(cmd);
-									id = cmd.ExecuteScalar();
-								}
-								else
-								{
-									id = -1;
-									DoPreExecute(cmd);
-									cmd.ExecuteNonQuery();
-								}
+								cmd.CommandText += string.Format("returning {0} as NewID", EscapeSqlIdentifier(primaryKeyNames.First()));
+								DoPreExecute(cmd);
+								id = cmd.ExecuteScalar();
 								OnExecutedCommand(cmd);
 								break;
 							case DBType.Oracle:
-								if (primaryKeyName != null)
-								{
-									cmd.CommandText += string.Format(" returning {0} into :newid", EscapeSqlIdentifier(primaryKeyName));
-									var param = cmd.CreateParameter();
-									param.ParameterName = ":newid";
-									param.Value = DBNull.Value;
-									param.Direction = ParameterDirection.ReturnValue;
-									param.DbType = DbType.Int64;
-									cmd.Parameters.Add(param);
-									DoPreExecute(cmd);
-									cmd.ExecuteNonQuery();
-									id = param.Value;
-								}
-								else
-								{
-									id = -1;
-									DoPreExecute(cmd);
-									cmd.ExecuteNonQuery();
-								}
+								cmd.CommandText += string.Format(" returning {0} into :newid", EscapeSqlIdentifier(primaryKeyNames.First()));
+								var param = cmd.CreateParameter();
+								param.ParameterName = ":newid";
+								param.Value = DBNull.Value;
+								param.Direction = ParameterDirection.ReturnValue;
+								param.DbType = DbType.Int64;
+								cmd.Parameters.Add(param);
+								DoPreExecute(cmd);
+								cmd.ExecuteNonQuery();
+								id = param.Value;
 								OnExecutedCommand(cmd);
 								break;
                             case DBType.SQLite:
-                                if (primaryKeyName != null)
-                                {
-                                    cmd.CommandText += ";\nSELECT last_insert_rowid();";
-                                    DoPreExecute(cmd);
-                                    id = cmd.ExecuteScalar();
-                                }
-                                else
-                                {
-                                    id = -1;
-                                    DoPreExecute(cmd);
-                                    cmd.ExecuteNonQuery();
-                                }
+                                cmd.CommandText += ";\nSELECT last_insert_rowid();";
+                                DoPreExecute(cmd);
+                                id = cmd.ExecuteScalar();
                                 OnExecutedCommand(cmd);
                                 break;
 							default:
@@ -1307,13 +1400,10 @@ namespace PetaPoco
 
 
 						// Assign the ID back to the primary key property
-						if (primaryKeyName != null)
+						PocoColumn pc;
+						if (pd.Columns.TryGetValue(identityKeyName, out pc))
 						{
-							PocoColumn pc;
-							if (pd.Columns.TryGetValue(primaryKeyName, out pc))
-							{
-								pc.SetValue(poco, pc.ChangeType(id));
-							}
+							pc.SetValue(poco, pc.ChangeType(id));
 						}
 
 						return id;
@@ -1331,21 +1421,31 @@ namespace PetaPoco
 			}
 		}
 
+        public object Insert(string tableName, IEnumerable<string> primaryKeyNames, object poco)
+        {
+            return Insert(tableName, primaryKeyNames, false, poco);
+        }
+
+        public object Insert(string tableName, string primaryKeyName, bool autoIncrement, object poco)
+        {
+            return Insert(tableName, new string[] { primaryKeyName }, autoIncrement, poco);
+        }
+
+        public object Insert(string tableName, string primaryKeyName, object poco)
+        {
+            return Insert(tableName, primaryKeyName, true, poco);
+        }
+
 		// Insert an annotated poco object
 		public object Insert(object poco)
 		{
 			var pd = PocoData.ForType(poco.GetType());
-			return Insert(pd.TableInfo.TableName, pd.TableInfo.PrimaryKey, pd.TableInfo.AutoIncrement, poco);
-		}
-
-		public int Update(string tableName, string primaryKeyName, object poco, object primaryKeyValue)
-		{
-			return Update(tableName, primaryKeyName, poco, primaryKeyValue, null);
+			return Insert(pd.TableInfo.TableName, pd.TableInfo.PrimaryKeys, pd.TableInfo.AutoIncrement, poco);
 		}
 
 
 		// Update a record with values from a poco.  primary key value can be either supplied or read from the poco
-		public int Update(string tableName, string primaryKeyName, object poco, object primaryKeyValue, IEnumerable<string> columns)
+		public int Update(string tableName, IEnumerable<string> primaryKeyNames, object poco, object primaryKeyValues, IEnumerable<string> columns)
 		{
 			try
 			{
@@ -1356,16 +1456,34 @@ namespace PetaPoco
 					{
 						var sb = new StringBuilder();
 						var index = 0;
-						var pd = PocoData.ForObject(poco,primaryKeyName);
+						var pd = PocoData.ForObject(poco,primaryKeyNames);
+
+                        IDictionary<string, object> keys = null;
+
+                        if (primaryKeyNames != null && primaryKeyValues != null)
+                        {
+                            keys = ParsePrimaryKeyValues(primaryKeyValues);
+                            if (keys == null)
+                            {
+                                keys = new Dictionary<string, object>();
+                                keys.Add(pd.TableInfo.PrimaryKeys[0], primaryKeyValues);
+                            }
+                        }
+                        else
+                        {
+                            keys = new Dictionary<string, object>();
+                        }
+                        
+
 						if (columns == null)
 						{
 							foreach (var i in pd.Columns)
 							{
 								// Don't update the primary key, but grab the value if we don't have it
-								if (string.Compare(i.Key, primaryKeyName, true) == 0)
+								if (primaryKeyNames.Any(p => string.Compare(i.Key, p, true) == 0))
 								{
-									if (primaryKeyValue == null)
-										primaryKeyValue = i.Value.GetValue(poco);
+									if (!keys.ContainsKey(i.Key) || keys[i.Key] == null)
+                                        keys[i.Key] = i.Value.GetValue(poco);
 									continue;
 								}
 
@@ -1397,18 +1515,24 @@ namespace PetaPoco
 								AddParam(cmd, pc.GetValue(poco), _paramPrefix);
 							}
 
-							// Grab primary key value
-							if (primaryKeyValue == null)
-							{
-								var pc = pd.Columns[primaryKeyName];
-								primaryKeyValue = pc.GetValue(poco);
-							}
-
+                            // Grab primary key values
+                            foreach (string primaryKeyName in primaryKeyNames)
+                            {
+                                if (!keys.ContainsKey(primaryKeyName) || keys[primaryKeyName] == null)
+                                {
+                                    var pc = pd.Columns[primaryKeyName];
+                                    keys[primaryKeyName] = pc.GetValue(poco);
+                                }
+                            }
 						}
+                        
+						cmd.CommandText = string.Format("UPDATE {0} SET {1} ", EscapeTableName(tableName), sb.ToString());
+                        cmd.CommandText += BuildPrimaryKeyWhere(keys.Keys, ref index, _paramPrefix);
 
-						cmd.CommandText = string.Format("UPDATE {0} SET {1} WHERE {2} = {3}{4}",
-											EscapeTableName(tableName), sb.ToString(), EscapeSqlIdentifier(primaryKeyName), _paramPrefix, index++);
-						AddParam(cmd, primaryKeyValue, _paramPrefix);
+                        foreach (var keyVal in keys)
+                        {
+                            AddParam(cmd, keyVal.Value, _paramPrefix);
+                        }
 
 						DoPreExecute(cmd);
 
@@ -1429,15 +1553,40 @@ namespace PetaPoco
 				throw;
 			}
 		}
+        
+        public int Update(string tableName, IEnumerable<string> primaryKeyNames, object poco, IEnumerable<string> columns)
+        {
+            return Update(tableName, primaryKeyNames, poco, null, columns);
+        }
+
+        public int Update(string tableName, IEnumerable<string> primaryKeyNames, object poco, object primaryKeyValues)
+        {
+            return Update(tableName, primaryKeyNames, poco, primaryKeyValues, null);
+        }
+
+        public int Update(string tableName, IEnumerable<string> primaryKeyNames, object poco)
+        {
+            return Update(tableName, primaryKeyNames, poco, null);
+        }
+
+        public int Update(string tableName, string primaryKeyName, object poco, object primaryKeyValue, IEnumerable<string> columns)
+        {
+            return Update(tableName, new string[] { primaryKeyName }, poco, primaryKeyValue, columns);
+        }
+
+        public int Update(string tableName, string primaryKeyName, object poco, IEnumerable<string> columns)
+        {
+            return Update(tableName, primaryKeyName, poco, null, columns);
+        }
+
+        public int Update(string tableName, string primaryKeyName, object poco, object primaryKeyValue)
+        {
+            return Update(tableName, new string[] { primaryKeyName }, poco, primaryKeyValue, null);
+        }
 
 		public int Update(string tableName, string primaryKeyName, object poco)
 		{
 			return Update(tableName, primaryKeyName, poco, null);
-		}
-
-		public int Update(string tableName, string primaryKeyName, object poco, IEnumerable<string> columns)
-		{
-			return Update(tableName, primaryKeyName, poco, null, columns);
 		}
 
 		public int Update(object poco, IEnumerable<string> columns)
@@ -1454,10 +1603,10 @@ namespace PetaPoco
 		{
 			return Update(poco, primaryKeyValue, null);
 		}
-		public int Update(object poco, object primaryKeyValue, IEnumerable<string> columns)
+		public int Update(object poco, object primaryKeyValues, IEnumerable<string> columns)
 		{
 			var pd = PocoData.ForType(poco.GetType());
-			return Update(pd.TableInfo.TableName, pd.TableInfo.PrimaryKey, poco, primaryKeyValue, columns);
+			return Update(pd.TableInfo.TableName, pd.TableInfo.PrimaryKeys, poco, primaryKeyValues, columns);
 		}
 
 		public int Update<T>(string sql, params object[] args)
@@ -1472,41 +1621,63 @@ namespace PetaPoco
 			return Execute(new Sql(string.Format("UPDATE {0}", EscapeTableName(pd.TableInfo.TableName))).Append(sql));
 		}
 
-		public int Delete(string tableName, string primaryKeyName, object poco)
-		{
-			return Delete(tableName, primaryKeyName, poco, null);
-		}
 
-		public int Delete(string tableName, string primaryKeyName, object poco, object primaryKeyValue)
-		{
-			// If primary key value not specified, pick it up from the object
-			if (primaryKeyValue == null)
-			{
-				var pd = PocoData.ForObject(poco,primaryKeyName);
-				PocoColumn pc;
-				if (pd.Columns.TryGetValue(primaryKeyName, out pc))
-				{
-					primaryKeyValue = pc.GetValue(poco);
-				}
-			}
+        public int Delete(string tableName, IEnumerable<string> primaryKeyNames, object poco, object primaryKeyValues)
+        {
+            IDictionary<string, object> primaryKeys;
 
-			// Do it
-			var sql = string.Format("DELETE FROM {0} WHERE {1}=@0", EscapeTableName(tableName), EscapeSqlIdentifier(primaryKeyName));
-			return Execute(sql, primaryKeyValue);
-		}
+            if (primaryKeyValues == null)
+            {
+                // If primary key value not specified, pick it up from the poco
+                primaryKeys = ParsePrimaryKeyValues(primaryKeyNames, poco);
+            }
+            else
+            {
+                // Else pick it up from the values object
+                primaryKeys = ParsePrimaryKeyValues(primaryKeyValues);
+
+                if (primaryKeys == null)
+                {
+                    primaryKeys = new Dictionary<string, object>();
+                    primaryKeys.Add(primaryKeyNames.First(), primaryKeyValues);
+                }
+            }
+
+            // Do it
+            StringBuilder deleteBuilder = new StringBuilder("DELETE FROM ");
+            deleteBuilder.AppendFormat("{0} ", EscapeTableName(tableName));
+            deleteBuilder.Append(BuildPrimaryKeyWhere(primaryKeys.Keys, "@"));
+            return Execute(deleteBuilder.ToString(), primaryKeys.Values.ToArray());
+
+        }
+
+        public int Delete(string tableName, IEnumerable<string> primaryKeyNames, object poco)
+        {
+            return Delete(tableName, primaryKeyNames, poco, null);
+        }
+
+        public int Delete(string tableName, string primaryKeyName, object poco)
+        {
+            return Delete(tableName, new string[] { primaryKeyName }, poco);
+        }
+
+        public int Delete(string tableName, string primaryKeyName, object poco, object primaryKeyValue)
+        {
+            return Delete(tableName, new string[] { primaryKeyName }, poco, primaryKeyValue);
+        }
 
 		public int Delete(object poco)
 		{
 			var pd = PocoData.ForType(poco.GetType());
-			return Delete(pd.TableInfo.TableName, pd.TableInfo.PrimaryKey, poco);
+			return Delete(pd.TableInfo.TableName, pd.TableInfo.PrimaryKeys, poco);
 		}
 
-		public int Delete<T>(object pocoOrPrimaryKey)
+		public int Delete<T>(object pocoOrPrimaryKeys)
 		{
-			if (pocoOrPrimaryKey.GetType() == typeof(T))
-				return Delete(pocoOrPrimaryKey);
+			if (pocoOrPrimaryKeys.GetType() == typeof(T))
+				return Delete(pocoOrPrimaryKeys);
 			var pd = PocoData.ForType(typeof(T));
-			return Delete(pd.TableInfo.TableName, pd.TableInfo.PrimaryKey, null, pocoOrPrimaryKey);
+			return Delete(pd.TableInfo.TableName, pd.TableInfo.PrimaryKeys, null, pocoOrPrimaryKeys);
 		}
 
 		public int Delete<T>(string sql, params object[] args)
@@ -1522,12 +1693,12 @@ namespace PetaPoco
 		}
 
 		// Check if a poco represents a new record
-		public bool IsNew(string primaryKeyName, object poco)
+		public bool IsNew(string identityKeyName, object poco)
 		{
-			var pd = PocoData.ForObject(poco, primaryKeyName);
+            var pd = PocoData.ForObject(poco, new string[] { identityKeyName });
 			object pk;
 			PocoColumn pc;
-			if (pd.Columns.TryGetValue(primaryKeyName, out pc))
+            if (pd.Columns.TryGetValue(identityKeyName, out pc))
 			{
 				pk = pc.GetValue(poco);
 			}
@@ -1539,9 +1710,9 @@ namespace PetaPoco
 #endif
 			else
 			{
-				var pi = poco.GetType().GetProperty(primaryKeyName);
+                var pi = poco.GetType().GetProperty(identityKeyName);
 				if (pi == null)
-					throw new ArgumentException(string.Format("The object doesn't have a property matching the primary key column name '{0}'", primaryKeyName));
+                    throw new ArgumentException(string.Format("The object doesn't have a property matching the primary key column name '{0}'", identityKeyName));
 				pk = pi.GetValue(poco, null);
 			}
 
@@ -1576,7 +1747,7 @@ namespace PetaPoco
 			var pd = PocoData.ForType(poco.GetType());
 			if (!pd.TableInfo.AutoIncrement)
 				throw new InvalidOperationException("IsNew() and Save() are only supported on tables with auto-increment/identity primary key columns");
-			return IsNew(pd.TableInfo.PrimaryKey, poco);
+			return IsNew(pd.TableInfo.PrimaryKeys.First(), poco);
 		}
 
 		// Insert new record or Update existing record
@@ -1594,8 +1765,10 @@ namespace PetaPoco
 
 		public void Save(object poco)
 		{
-			var pd = PocoData.ForType(poco.GetType());
-			Save(pd.TableInfo.TableName, pd.TableInfo.PrimaryKey, poco);
+            var pd = PocoData.ForType(poco.GetType());
+            if (!pd.TableInfo.AutoIncrement)
+                throw new InvalidOperationException("IsNew() and Save() are only supported on tables with auto-increment/identity primary key columns");
+			Save(pd.TableInfo.TableName, pd.TableInfo.PrimaryKeys.First(), poco);
 		}
 
 		public int CommandTimeout { get; set; }
@@ -1681,7 +1854,7 @@ namespace PetaPoco
 		}
 		public class PocoData
 		{
-			public static PocoData ForObject(object o, string primaryKeyName)
+            public static PocoData ForObject(object o, IEnumerable<string> primaryKeyNames)
 			{
 				var t = o.GetType();
 #if !PETAPOCO_NO_DYNAMIC
@@ -1690,12 +1863,15 @@ namespace PetaPoco
 					var pd = new PocoData();
 					pd.TableInfo = new TableInfo();
 					pd.Columns = new Dictionary<string, PocoColumn>(StringComparer.OrdinalIgnoreCase);
-					pd.Columns.Add(primaryKeyName, new ExpandoColumn() { ColumnName = primaryKeyName });
-					pd.TableInfo.PrimaryKey = primaryKeyName;
+                    foreach (string primaryKey in primaryKeyNames)
+                    {
+                        pd.Columns.Add(primaryKey, new ExpandoColumn() { ColumnName = primaryKey });
+                    }
+					pd.TableInfo.PrimaryKeys = primaryKeyNames.ToArray();
 					pd.TableInfo.AutoIncrement = true;
 					foreach (var col in (o as IDictionary<string, object>).Keys)
 					{
-						if (col!=primaryKeyName)
+						if (!primaryKeyNames.Contains(col))
 							pd.Columns.Add(col, new ExpandoColumn() { ColumnName = col });
 					}
 					return pd;
@@ -1761,7 +1937,7 @@ namespace PetaPoco
 
 				// Get the primary key
 				a = t.GetCustomAttributes(typeof(PrimaryKeyAttribute), true);
-				TableInfo.PrimaryKey = a.Length == 0 ? "ID" : (a[0] as PrimaryKeyAttribute).Value;
+				TableInfo.PrimaryKeys = a.Length == 0 ? new string[] { "ID" } : (a[0] as PrimaryKeyAttribute).Columns;
 				TableInfo.SequenceName = a.Length == 0 ? null : (a[0] as PrimaryKeyAttribute).sequenceName;
 				TableInfo.AutoIncrement = a.Length == 0 ? false : (a[0] as PrimaryKeyAttribute).autoIncrement;
 
